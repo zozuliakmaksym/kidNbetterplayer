@@ -648,6 +648,9 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
 }
 
 - (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController  API_AVAILABLE(ios(9.0)){
+    if (self._playerLayer) {
+        [self._playerLayer removeFromSuperlayer];
+    }
     if (_eventSink != nil) {
         _eventSink(@{@"event" : @"pipStart"});
     }
