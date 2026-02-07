@@ -4,6 +4,7 @@
 
 #import "BetterPlayer.h"
 #import <better_player/better_player-Swift.h>
+#import <QuartzCore/QuartzCore.h>
 
 static void* timeRangeContext = &timeRangeContext;
 static void* statusContext = &statusContext;
@@ -20,10 +21,14 @@ AVPictureInPictureController *_pipController;
 #endif
 
 @implementation BetterPlayer
+{
+    CFTimeInterval _lastPipPlayTime;
+    NSInteger _pipPlayResumeAttempts;
+}
 #ifdef BETTER_PLAYER_FLUTTER_TEXTURE
 - (instancetype)initWithFrameUpdater:(FrameUpdater*)frameUpdater {
 #else
-- (instancetype)initWithFrame:(CGRect)frame {
+    - (instancetype)initWithFrame:(CGRect)frame {
 #endif
     self = [super init];
     NSAssert(self, @"super init cannot be nil");
@@ -36,12 +41,12 @@ AVPictureInPictureController *_pipController;
     if (@available(iOS 10.0, *)) {
         _player.automaticallyWaitsToMinimizeStalling = false;
     }
-  
+
 #ifdef BETTER_PLAYER_FLUTTER_TEXTURE
-  _displayLink = [CADisplayLink displayLinkWithTarget:frameUpdater
-                                             selector:@selector(onDisplayLink:)];
-  [_displayLink addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSRunLoopCommonModes];
-  _displayLink.paused = YES;
+    _displayLink = [CADisplayLink displayLinkWithTarget:frameUpdater
+                                               selector:@selector(onDisplayLink:)];
+    [_displayLink addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSRunLoopCommonModes];
+    _displayLink.paused = YES;
 #endif
     self._observersAdded = false;
     return self;
@@ -93,7 +98,7 @@ AVPictureInPictureController *_pipController;
 #endif
 
 - (void)clear {
-  
+
 #ifdef BETTER_PLAYER_FLUTTER_TEXTURE
     _displayLink.paused = YES;
 #endif
@@ -151,9 +156,9 @@ AVPictureInPictureController *_pipController;
 
         }
 #ifdef BETTER_PLAYER_FLUTTER_TEXTURE
-      [_player pause];
-      _isPlaying = false;
-      _displayLink.paused = YES;
+        [_player pause];
+        _isPlaying = false;
+        _displayLink.paused = YES;
 #endif
     }
 }
@@ -175,7 +180,7 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
     if (_player.currentItem == nil) {
         return;
     }
-    
+
     if (_videoOutput) {
         NSArray<AVPlayerItemOutput*>* outputs = [[_player currentItem] outputs];
         for (AVPlayerItemOutput* output in outputs) {
@@ -184,10 +189,10 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
             }
         }
     }
-    
+
     NSDictionary* pixBuffAttributes = @{
-        (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
-        (id)kCVPixelBufferIOSurfacePropertiesKey : @{}
+            (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+            (id)kCVPixelBufferIOSurfacePropertiesKey : @{}
     };
     _videoOutput = [[AVPlayerItemVideoOutput alloc] initWithPixelBufferAttributes:pixBuffAttributes];
     [_player.currentItem addOutput:_videoOutput];
@@ -204,7 +209,7 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
     if (headers == [NSNull null] || headers == NULL){
         headers = @{};
     }
-    
+
     AVPlayerItem* item;
     if (useCache){
         if (cacheKey == [NSNull null]){
@@ -213,7 +218,7 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
         if (videoExtension == [NSNull null]){
             videoExtension = nil;
         }
-        
+
         item = [cacheManager getCachingPlayerItemForNormalPlayback:url cacheKey:cacheKey videoExtension: videoExtension headers:headers];
     } else {
         AVURLAsset* asset = [AVURLAsset URLAssetWithURL:url
@@ -248,7 +253,7 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
     if (_isStalledCheckStarted){
         return;
     }
-   _isStalledCheckStarted = true;
+    _isStalledCheckStarted = true;
     [self startStalledCheck];
 }
 
@@ -261,9 +266,9 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
         if (_stalledCount > 60){
             if (_eventSink != nil) {
                 _eventSink([FlutterError
-                        errorWithCode:@"VideoError"
-                        message:@"Failed to load video: playback stalled"
-                        details:nil]);
+                                   errorWithCode:@"VideoError"
+                                         message:@"Failed to load video: playback stalled"
+                                         details:nil]);
             }
             return;
         }
@@ -295,12 +300,23 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
     if ([path isEqualToString:@"rate"]) {
         if (@available(iOS 10.0, *)) {
             if (_pipController.pictureInPictureActive == true){
+                CFTimeInterval now = CACurrentMediaTime();
                 if (_lastAvPlayerTimeControlStatus != [NSNull null] && _lastAvPlayerTimeControlStatus == _player.timeControlStatus){
                     return;
                 }
 
                 if (_player.timeControlStatus == AVPlayerTimeControlStatusPaused){
                     _lastAvPlayerTimeControlStatus = _player.timeControlStatus;
+                    if (_lastPipPlayTime > 0 &&
+                        (now - _lastPipPlayTime) < 2.0 &&
+                        _pipPlayResumeAttempts < 3) {
+                        _pipPlayResumeAttempts += 1;
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+                                       dispatch_get_main_queue(), ^{
+                            [self play];
+                        });
+                        return;
+                    }
                     if (_eventSink != nil) {
                       _eventSink(@{@"event" : @"pause"});
                     }
@@ -309,6 +325,8 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
                 }
                 if (_player.timeControlStatus == AVPlayerTimeControlStatusPlaying){
                     _lastAvPlayerTimeControlStatus = _player.timeControlStatus;
+                    _lastPipPlayTime = now;
+                    _pipPlayResumeAttempts = 0;
                     if (_eventSink != nil) {
                       _eventSink(@{@"event" : @"play"});
                     }
@@ -318,8 +336,8 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
 
         if (_player.rate == 0 && //if player rate dropped to 0
             CMTIME_COMPARE_INLINE(_player.currentItem.currentTime, >, kCMTimeZero) && //if video was started
-            CMTIME_COMPARE_INLINE(_player.currentItem.currentTime, <, _player.currentItem.duration) && //but not yet finished
-            _isPlaying) { //instance variable to handle overall state (changed to YES when user triggers playback)
+        CMTIME_COMPARE_INLINE(_player.currentItem.currentTime, <, _player.currentItem.duration) && //but not yet finished
+        _isPlaying) { //instance variable to handle overall state (changed to YES when user triggers playback)
             [self handleStalled];
         }
     }
@@ -356,10 +374,10 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
 
                 if (_eventSink != nil) {
                     _eventSink([FlutterError
-                                errorWithCode:@"VideoError"
-                                message:[@"Failed to load video: "
-                                         stringByAppendingString:[item.error localizedDescription]]
-                                details:nil]);
+                                       errorWithCode:@"VideoError"
+                                             message:[@"Failed to load video: "
+                                                     stringByAppendingString:[item.error localizedDescription]]
+                                             details:nil]);
                 }
                 break;
             case AVPlayerItemStatusUnknown:
@@ -457,12 +475,12 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
 #endif
         [self updatePlayingState];
         _eventSink(@{
-            @"event" : @"initialized",
-            @"duration" : @([self duration]),
-            @"width" : @(fabs(realSize.width) ? : width),
-            @"height" : @(fabs(realSize.height) ? : height),
-            @"key" : _key
-        });
+                           @"event" : @"initialized",
+                           @"duration" : @([self duration]),
+                           @"width" : @(fabs(realSize.width) ? : width),
+                           @"height" : @(fabs(realSize.height) ? : height),
+                           @"key" : _key
+                   });
     }
 }
 
@@ -511,10 +529,10 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
         toleranceBefore:kCMTimeZero
          toleranceAfter:kCMTimeZero
       completionHandler:^(BOOL finished){
-        if (wasPlaying){
-            _player.rate = _playerRate;
-        }
-    }];
+          if (wasPlaying){
+              _player.rate = _playerRate;
+          }
+      }];
 }
 
 - (void)setIsLooping:(bool)isLooping {
@@ -645,6 +663,8 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
 #if TARGET_OS_IOS
 - (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController  API_AVAILABLE(ios(9.0)){
     [self disablePictureInPicture];
+    _lastPipPlayTime = 0;
+    _pipPlayResumeAttempts = 0;
 }
 
 - (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController  API_AVAILABLE(ios(9.0)){
@@ -712,11 +732,11 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
 - (CVPixelBufferRef)prevTransparentBuffer {
     if (_prevBuffer) {
         CVPixelBufferLockBaseAddress(_prevBuffer, 0);
-        
+
         int bufferWidth = CVPixelBufferGetWidth(_prevBuffer);
         int bufferHeight = CVPixelBufferGetHeight(_prevBuffer);
         unsigned char* pixel = (unsigned char*)CVPixelBufferGetBaseAddress(_prevBuffer);
-        
+
         for (int row = 0; row < bufferHeight; row++) {
             for (int column = 0; column < bufferWidth; column++) {
                 pixel[0] = 0;
@@ -739,7 +759,7 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
      ![[_player currentItem] isPlaybackLikelyToKeepUp]) {
      return [self prevTransparentBuffer];
      }*/
-    
+
     CMTime outputItemTime = [_videoOutput itemTimeForHostTime:CACurrentMediaTime()];
     if ([_videoOutput hasNewPixelBufferForItemTime:outputItemTime]) {
         _failedCount = 0;
