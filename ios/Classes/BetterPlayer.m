@@ -5,6 +5,7 @@
 #import "BetterPlayer.h"
 #import <better_player/better_player-Swift.h>
 #import <QuartzCore/QuartzCore.h>
+#import <MediaPlayer/MediaPlayer.h>
 
 static void* timeRangeContext = &timeRangeContext;
 static void* statusContext = &statusContext;
@@ -23,7 +24,10 @@ AVPictureInPictureController *_pipController;
 @implementation BetterPlayer
 {
     CFTimeInterval _lastPipPlayTime;
-    NSInteger _pipPlayResumeAttempts;
+    CFTimeInterval _pipSuppressPauseUntil;
+    BOOL _pipAutoResumedInWindow;
+    CFTimeInterval _lastPipEventTime;
+    int _lastPipEventType; // 1 = play, 2 = pause
 }
 #ifdef BETTER_PLAYER_FLUTTER_TEXTURE
 - (instancetype)initWithFrameUpdater:(FrameUpdater*)frameUpdater {
@@ -146,6 +150,7 @@ AVPictureInPictureController *_pipController;
 }
 
 - (void)itemDidPlayToEndTime:(NSNotification*)notification {
+    NSLog(@"[BetterPlayer][PiP] itemDidPlayToEndTime");
     if (_isLooping) {
         AVPlayerItem* p = [notification object];
         [p seekToTime:kCMTimeZero completionHandler:nil];
@@ -301,22 +306,30 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
         if (@available(iOS 10.0, *)) {
             if (_pipController.pictureInPictureActive == true){
                 CFTimeInterval now = CACurrentMediaTime();
+                NSLog(@"[BetterPlayer][PiP] timeControlStatus=%ld rate=%.3f",
+                      (long)_player.timeControlStatus, _player.rate);
                 if (_lastAvPlayerTimeControlStatus != [NSNull null] && _lastAvPlayerTimeControlStatus == _player.timeControlStatus){
                     return;
                 }
 
                 if (_player.timeControlStatus == AVPlayerTimeControlStatusPaused){
                     _lastAvPlayerTimeControlStatus = _player.timeControlStatus;
-                    if (_lastPipPlayTime > 0 &&
-                        (now - _lastPipPlayTime) < 2.0 &&
-                        _pipPlayResumeAttempts < 3) {
-                        _pipPlayResumeAttempts += 1;
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
-                                       dispatch_get_main_queue(), ^{
-                            [self play];
-                        });
+                    NSLog(@"[BetterPlayer][PiP] pause event");
+                    if (_lastPipPlayTime > 0 && now < _pipSuppressPauseUntil) {
+                        if (!_pipAutoResumedInWindow) {
+                            _pipAutoResumedInWindow = YES;
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
+                                           dispatch_get_main_queue(), ^{
+                                [self play];
+                            });
+                        }
                         return;
                     }
+                    if (_lastPipEventType == 1 && (now - _lastPipEventTime) < 1.5) {
+                        return;
+                    }
+                    _lastPipEventType = 2;
+                    _lastPipEventTime = now;
                     if (_eventSink != nil) {
                       _eventSink(@{@"event" : @"pause"});
                     }
@@ -325,8 +338,15 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
                 }
                 if (_player.timeControlStatus == AVPlayerTimeControlStatusPlaying){
                     _lastAvPlayerTimeControlStatus = _player.timeControlStatus;
+                    NSLog(@"[BetterPlayer][PiP] play event");
                     _lastPipPlayTime = now;
-                    _pipPlayResumeAttempts = 0;
+                    _pipSuppressPauseUntil = now + 0.6;
+                    _pipAutoResumedInWindow = NO;
+                    if (_lastPipEventType == 2 && (now - _lastPipEventTime) < 1.0) {
+                        return;
+                    }
+                    _lastPipEventType = 1;
+                    _lastPipEventTime = now;
                     if (_eventSink != nil) {
                       _eventSink(@{@"event" : @"play"});
                     }
@@ -610,6 +630,14 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
     if (@available(iOS 9.0, *)) {
         [[AVAudioSession sharedInstance] setActive: YES error: nil];
         [[UIApplication sharedApplication] beginReceivingRemoteControlEvents];
+        MPRemoteCommandCenter *commandCenter = [MPRemoteCommandCenter sharedCommandCenter];
+        commandCenter.stopCommand.enabled = YES;
+        [commandCenter.stopCommand removeTarget:nil];
+        __weak typeof(self) weakSelf = self;
+        [commandCenter.stopCommand addTargetWithHandler:^MPRemoteCommandHandlerStatus(MPRemoteCommandEvent * _Nonnull event) {
+            [weakSelf pause];
+            return MPRemoteCommandHandlerStatusSuccess;
+        }];
         if (!_pipController && self._playerLayer && [AVPictureInPictureController isPictureInPictureSupported]) {
             _pipController = [[AVPictureInPictureController alloc] initWithPlayerLayer:self._playerLayer];
             _pipController.delegate = self;
@@ -662,12 +690,17 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
 
 #if TARGET_OS_IOS
 - (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController  API_AVAILABLE(ios(9.0)){
+    NSLog(@"[BetterPlayer][PiP] didStop");
     [self disablePictureInPicture];
     _lastPipPlayTime = 0;
-    _pipPlayResumeAttempts = 0;
+    _pipSuppressPauseUntil = 0;
+    _pipAutoResumedInWindow = NO;
+    _lastPipEventTime = 0;
+    _lastPipEventType = 0;
 }
 
 - (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController  API_AVAILABLE(ios(9.0)){
+    NSLog(@"[BetterPlayer][PiP] didStart");
     if (self._playerLayer) {
         [self._playerLayer removeFromSuperlayer];
     }
